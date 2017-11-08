@@ -2,8 +2,9 @@
 
 [![Serverless][ico-serverless]][link-serverless]
 [![License][ico-license]][link-license]
-[![CircleCI][ico-circleci]][link-circleci]
 [![NPM][ico-npm]][link-npm]
+[![Build Status][ico-build]][link-build]
+[![Coverage Status][ico-coverage]][link-coverage]
 [![Contributors][ico-contributors]][link-contributors]
 
 A Serverless v1.x plugin to build your lambda functions with [Webpack][link-webpack].
@@ -23,13 +24,10 @@ individually, resulting in smaller Lambda packages that contain only the code an
 dependencies needed to run the function. This allows the plugin to fully utilize
 WebPack's [Tree-Shaking][link-webpack-tree] optimization.
 
-## New in V3
+## Recent improvements and important changes
 
-* Support for individual packaging and optimization
-* Integrate with `serverless invoke local` (including watch mode)
-* Stabilized package handling
-* Improved compatibility with other plugins
-* Updated examples
+* Improved extensibility for plugin authors (see _For Developers_ section)
+* Serverless 1.12+ is now required
 
 For the complete release notes see the end of this document.
 
@@ -135,17 +133,36 @@ for best compatibility with external dependencies:
 
 ```js
 // webpack.config.js
+const path = require('path');
 
 module.exports = {
   // ...
   output: {
     libraryTarget: 'commonjs',
-    path: '.webpack',
-    filename: 'handler.js', // this should match the first part of function handler in `serverless.yml`
+    path: path.resolve(__dirname, '.webpack'),
+    filename: '[name].js',
   },
   // ...
 };
 ```
+
+### Stats
+
+By default, the plugin will print a quite verbose bundle information to your console. However, if
+you are not satisfy with the current output info, you can overwrite it in your `webpack.config.js`
+
+```js
+// webpack.config.js
+
+module.export = {
+  // ...
+  stats: 'minimal'
+  // ...
+}
+```
+
+All the stats config can be found in [webpack's documentation](https://webpack.js.org/configuration/stats/)
+
 
 ### Node modules / externals
 
@@ -162,7 +179,7 @@ option in `serverless.yml`:
 // webpack.config.js
 var nodeExternals = require('webpack-node-externals')
 
-modules.export = {
+module.exports = {
   // we use webpack-node-externals to excludes all node deps.
   // You can manually set the externals too.
   externals: [nodeExternals()],
@@ -190,6 +207,45 @@ custom:
     packagePath: '../package.json' # relative path to custom package.json file.
 ```
 > Note that only relative path is supported at the moment.
+
+#### Forced inclusion
+
+Sometimes it might happen that you use dynamic requires in your code, i.e. you
+require modules that are only known at runtime. Webpack is not able to detect
+such externals and the compiled package will miss the needed dependencies.
+In such cases you can force the plugin to include certain modules by setting
+them in the `forceInclude` array property. However the module must appear in
+your service's production dependencies in `package.json`.
+
+```yaml
+# serverless.yml
+custom:
+  webpackIncludeModules:
+    forceInclude:
+      - module1
+      - module2
+```
+
+#### Forced exclusion
+
+You can forcefully exclude detected external modules, e.g. if you have a module
+in your dependencies that is already installed at your provider's environment.
+
+Just add them to the `forceExclude` array property and they will not be packaged.
+
+```yaml
+# serverless.yml
+custom:
+  webpackIncludeModules:
+    forceExclude:
+      - module1
+      - module2
+```
+
+If you specify a module in both arrays, `forceInclude` and `forceExclude`, the
+exclude wins and the module will not be packaged.
+
+#### Examples
 
 You can find an example setups in the [`examples`][link-examples] folder.
 
@@ -269,6 +325,10 @@ $ serverless invoke local --function <function-name> --path event.json --watch
 Everytime the sources are changed, the function will be executed again with the
 changed sources. The command will watch until the process is terminated.
 
+If you have your sources located on a file system that does not offer events,
+you can enable polling with the `--webpack-use-polling=<time in ms>` option.
+If you omit the value, it defaults to 3000 ms.
+
 All options that are supported by invoke local can be used as usual:
 
 - `--function` or `-f` (required) is the name of the function to run
@@ -298,6 +358,11 @@ Run `serverless offline` or `serverless offline start` to start the Lambda/API s
 In comparison to `serverless offline`, the `start` command will fire an `init` and a `end` lifecycle hook which is needed for `serverless-offline` and e.g. `serverless-dynamodb-local` to switch off resources (see below).
 
 You can find an example setup in the [`examples`][link-examples] folder.
+
+If you have your sources located on a file system that does not offer events,
+e.g. a mounted volume in a Docker container, you can enable polling with the
+`--webpack-use-polling=<time in ms>` option. If you omit the value, it defaults
+to 3000 ms.
 
 #### Custom paths
 
@@ -354,10 +419,87 @@ Plugin commands are supported by the following providers. ⁇ indicates that com
 |                       | AWS Lambda | Apache OpenWhisk | Azure Functions | Google Cloud Functions |
 |-----------------------|------------|------------------|-----------------|------------------------|
 | webpack               |      ✔︎     |         ✔︎        |        ⁇        |            ⁇           |
-| invoke local          |      ✔︎     |         ⁇        |        ⁇        |            ⁇           |
-| invoke local --watch  |      ✔︎     |         ⁇        |        ⁇        |            ⁇           |
+| invoke local          |      ✔︎     |         ✔︎        |        ⁇        |            ⁇           |
+| invoke local --watch  |      ✔︎     |         ✔︎        |        ⁇        |            ⁇           |
+
+## For developers
+
+The plugin exposes a complete lifecycle model that can be hooked by other plugins to extend
+the functionality of the plugin or add additional actions.
+
+### The event lifecycles and their hookable events (H)
+
+All events (H) can be hooked by a plugin.
+
+```
+-> webpack:validate
+   -> webpack:validate:validate (H)
+-> webpack:compile
+   -> webpack:compile:compile (H)
+-> webpack:package
+   -> webpack:package:packExternalModules (H)
+   -> webpack:package:packageModules (H)
+```
+
+### Integration of the lifecycles into the command invocations and hooks
+
+The following list shows all lifecycles that are invoked/started by the
+plugin when running a command or invoked by a hook.
+
+```
+-> before:package:createDeploymentArtifacts
+   -> webpack:validate
+   -> webpack:compile
+   -> webpack:package
+
+-> before:deploy:function:packageFunction
+   -> webpack:validate
+   -> webpack:compile
+   -> webpack:package
+
+-> before:invoke:local:invoke
+   -> webpack:validate
+   -> webpack:compile
+
+-> webpack
+   -> webpack:validate
+   -> webpack:compile
+   -> webpack:package
+
+-> before:offline:start
+   -> webpack:validate
+   -> webpack:compile
+
+-> before:offline:start:init
+   -> webpack:validate
+   -> webpack:compile
+```
 
 ## Release Notes
+
+* 4.0.0
+  * BREAKING: Expose lifecycle events for plugin authors [#254][link-254]
+  * Fixed deprecated hook warning [#126][link-126]
+  * Support forceExclude option for external modules [#247][link-247]
+  * Support stats output configuration in webpack config [#260][link-260]
+  * Google: Only integrate package.json but not node modules into artifact [#264][link-264]
+  * Documentation fixes and updates [#265][link-265]
+  * Updated examples [#250][link-250]
+
+* 3.1.2
+  * Fix issue where dependencies with dots in their names would not be installed [#251][link-251]
+
+* 3.1.1
+  * Fix issue where locked dependencies (package-lock.json) were ignored [#245][link-245]
+
+* 3.1.0
+  * Allow filesystem polling in watch mode (`--webpack-use-polling`) [#215][link-215]
+  * Allow forced include of not referenced modules [#217][link-217]
+  * Automatically include peer dependencies of used modules [#223][link-223]
+  * Show explicit message if the provided webpack config can not be loaded [#234][link-234]
+  * Improve examples [#227][link-227]
+  * Update 3rd party provider compatibility table [#221][link-221]
+  * Added automatic Travis and Coveralls builds to increase stability
 
 * 3.0.0
   * Integrate with `serverless invoke local` [#151][link-151]
@@ -370,6 +512,10 @@ Plugin commands are supported by the following providers. ⁇ indicates that com
   * Removed the `webpack serve` command in favor of [`serverless-offline`][link-serverless-offline] [#152][link-152]
   * Updated examples [#179][link-179]
   * Added missing unit tests to improve code stability
+  * Fixed unit tests to run on Windows [#145][link-145]
+
+* 2.2.2
+  * Reverted breaking change introduced in default output config [#202][link-202]
 
 * 2.2.1
   * Restore functionality for Google provider [#193][link-193]
@@ -392,16 +538,18 @@ Plugin commands are supported by the following providers. ⁇ indicates that com
   * Print Webpack stats on recompile [#127][link-127]
 
 [ico-serverless]: http://public.serverless.com/badges/v3.svg
-[ico-license]: https://img.shields.io/github/license/elastic-coders/serverless-webpack.svg
-[ico-circleci]: https://img.shields.io/circleci/project/github/elastic-coders/serverless-webpack.svg
+[ico-license]: https://img.shields.io/github/license/serverless-heaven/serverless-webpack.svg
 [ico-npm]: https://img.shields.io/npm/v/serverless-webpack.svg
-[ico-contributors]: https://img.shields.io/github/contributors/elastic-coders/serverless-webpack.svg
+[ico-build]: https://travis-ci.org/serverless-heaven/serverless-webpack.svg?branch=master
+[ico-coverage]: https://coveralls.io/repos/github/serverless-heaven/serverless-webpack/badge.svg?branch=master
+[ico-contributors]: https://img.shields.io/github/contributors/serverless-heaven/serverless-webpack.svg
 
 [link-serverless]: http://www.serverless.com/
 [link-license]: ./blob/master/LICENSE
-[link-circleci]: https://circleci.com/gh/elastic-coders/serverless-webpack/
 [link-npm]: https://www.npmjs.com/package/serverless-webpack
-[link-contributors]: https://github.com/elastic-coders/serverless-webpack/graphs/contributors
+[link-build]: https://travis-ci.org/serverless-heaven/serverless-webpack
+[link-coverage]: https://coveralls.io/github/serverless-heaven/serverless-webpack?branch=master
+[link-contributors]: https://github.com/serverless-heaven/serverless-webpack/graphs/contributors
 
 [link-webpack]: https://webpack.github.io/
 [link-babel]: https://babeljs.io/
@@ -415,34 +563,56 @@ Plugin commands are supported by the following providers. ⁇ indicates that com
 
 [comment]: # (Referenced issues)
 
-[link-135]: https://github.com/elastic-coders/serverless-webpack/issues/135
+[link-135]: https://github.com/serverless-heaven/serverless-webpack/issues/135
 
-[link-83]: https://github.com/elastic-coders/serverless-webpack/pull/83
-[link-88]: https://github.com/elastic-coders/serverless-webpack/pull/88
-[link-127]: https://github.com/elastic-coders/serverless-webpack/pull/127
-[link-131]: https://github.com/elastic-coders/serverless-webpack/pull/131
-[link-132]: https://github.com/elastic-coders/serverless-webpack/pull/132
-[link-140]: https://github.com/elastic-coders/serverless-webpack/pull/140
-[link-141]: https://github.com/elastic-coders/serverless-webpack/issues/141
-[link-144]: https://github.com/elastic-coders/serverless-webpack/issues/144
+[link-83]: https://github.com/serverless-heaven/serverless-webpack/pull/83
+[link-88]: https://github.com/serverless-heaven/serverless-webpack/pull/88
+[link-127]: https://github.com/serverless-heaven/serverless-webpack/pull/127
+[link-131]: https://github.com/serverless-heaven/serverless-webpack/pull/131
+[link-132]: https://github.com/serverless-heaven/serverless-webpack/pull/132
+[link-140]: https://github.com/serverless-heaven/serverless-webpack/pull/140
+[link-141]: https://github.com/serverless-heaven/serverless-webpack/issues/141
+[link-144]: https://github.com/serverless-heaven/serverless-webpack/issues/144
 
-[link-11]: https://github.com/elastic-coders/serverless-webpack/issues/11
-[link-107]: https://github.com/elastic-coders/serverless-webpack/issues/107
-[link-129]: https://github.com/elastic-coders/serverless-webpack/pull/129
-[link-154]: https://github.com/elastic-coders/serverless-webpack/issues/154
-[link-159]: https://github.com/elastic-coders/serverless-webpack/issues/159
+[link-11]: https://github.com/serverless-heaven/serverless-webpack/issues/11
+[link-107]: https://github.com/serverless-heaven/serverless-webpack/issues/107
+[link-129]: https://github.com/serverless-heaven/serverless-webpack/pull/129
+[link-154]: https://github.com/serverless-heaven/serverless-webpack/issues/154
+[link-159]: https://github.com/serverless-heaven/serverless-webpack/issues/159
 
-[link-158]: https://github.com/elastic-coders/serverless-webpack/issues/158
-[link-165]: https://github.com/elastic-coders/serverless-webpack/issues/165
+[link-158]: https://github.com/serverless-heaven/serverless-webpack/issues/158
+[link-165]: https://github.com/serverless-heaven/serverless-webpack/issues/165
 
-[link-193]: https://github.com/elastic-coders/serverless-webpack/issues/193
+[link-193]: https://github.com/serverless-heaven/serverless-webpack/issues/193
 
-[link-116]: https://github.com/elastic-coders/serverless-webpack/issues/116
-[link-117]: https://github.com/elastic-coders/serverless-webpack/issues/117
-[link-120]: https://github.com/elastic-coders/serverless-webpack/issues/120
-[link-151]: https://github.com/elastic-coders/serverless-webpack/issues/151
-[link-152]: https://github.com/elastic-coders/serverless-webpack/issues/152
-[link-173]: https://github.com/elastic-coders/serverless-webpack/issues/173
-[link-179]: https://github.com/elastic-coders/serverless-webpack/pull/179
-[link-185]: https://github.com/elastic-coders/serverless-webpack/pull/185
-[link-186]: https://github.com/elastic-coders/serverless-webpack/pull/186
+[link-116]: https://github.com/serverless-heaven/serverless-webpack/issues/116
+[link-117]: https://github.com/serverless-heaven/serverless-webpack/issues/117
+[link-120]: https://github.com/serverless-heaven/serverless-webpack/issues/120
+[link-145]: https://github.com/serverless-heaven/serverless-webpack/issues/145
+[link-151]: https://github.com/serverless-heaven/serverless-webpack/issues/151
+[link-152]: https://github.com/serverless-heaven/serverless-webpack/issues/152
+[link-173]: https://github.com/serverless-heaven/serverless-webpack/issues/173
+[link-179]: https://github.com/serverless-heaven/serverless-webpack/pull/179
+[link-185]: https://github.com/serverless-heaven/serverless-webpack/pull/185
+[link-186]: https://github.com/serverless-heaven/serverless-webpack/pull/186
+
+[link-202]: https://github.com/serverless-heaven/serverless-webpack/issues/202
+
+[link-215]: https://github.com/serverless-heaven/serverless-webpack/issues/215
+[link-217]: https://github.com/serverless-heaven/serverless-webpack/issues/217
+[link-221]: https://github.com/serverless-heaven/serverless-webpack/pull/221
+[link-223]: https://github.com/serverless-heaven/serverless-webpack/issues/223
+[link-227]: https://github.com/serverless-heaven/serverless-webpack/pull/227
+[link-234]: https://github.com/serverless-heaven/serverless-webpack/pull/234
+
+[link-245]: https://github.com/serverless-heaven/serverless-webpack/issues/245
+
+[link-251]: https://github.com/serverless-heaven/serverless-webpack/issues/251
+
+[link-126]: https://github.com/serverless-heaven/serverless-webpack/issues/126
+[link-247]: https://github.com/serverless-heaven/serverless-webpack/issues/247
+[link-250]: https://github.com/serverless-heaven/serverless-webpack/issues/250
+[link-254]: https://github.com/serverless-heaven/serverless-webpack/pull/254
+[link-260]: https://github.com/serverless-heaven/serverless-webpack/issues/260
+[link-264]: https://github.com/serverless-heaven/serverless-webpack/pull/264
+[link-265]: https://github.com/serverless-heaven/serverless-webpack/pull/265
