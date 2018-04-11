@@ -9,7 +9,9 @@ const wpwatch = require('./lib/wpwatch');
 const cleanup = require('./lib/cleanup');
 const run = require('./lib/run');
 const prepareLocalInvoke = require('./lib/prepareLocalInvoke');
+const runPluginSupport = require('./lib/runPluginSupport');
 const prepareOfflineInvoke = require('./lib/prepareOfflineInvoke');
+const prepareStepOfflineInvoke = require('./lib/prepareStepOfflineInvoke');
 const packExternalModules = require('./lib/packExternalModules');
 const packageModules = require('./lib/packageModules');
 const lib = require('./lib');
@@ -25,8 +27,11 @@ class ServerlessWebpack {
     this.options = options;
 
     if (
-      _.has(this.serverless, 'service.custom.webpack') &&
-      _.endsWith(this.serverless.service.custom.webpack, '.ts')
+      (_.has(this.serverless, 'service.custom.webpack') &&
+      _.isString(this.serverless.service.custom.webpack) &&
+      _.endsWith(this.serverless.service.custom.webpack, '.ts')) ||
+      (_.has(this.serverless, 'service.custom.webpack.webpackConfig') &&
+      _.endsWith(this.serverless.service.custom.webpack.webpackConfig, '.ts'))
     ) {
       require('ts-node/register');
     }
@@ -41,7 +46,9 @@ class ServerlessWebpack {
       packExternalModules,
       packageModules,
       prepareLocalInvoke,
-      prepareOfflineInvoke
+      runPluginSupport,
+      prepareOfflineInvoke,
+      prepareStepOfflineInvoke
     );
 
     this.commands = {
@@ -68,6 +75,14 @@ class ServerlessWebpack {
             lifecycleEvents: [
               'compile',
             ],
+            commands: {
+              watch: {
+                type: 'entrypoint',
+                lifecycleEvents: [
+                  'compile'
+                ]
+              }
+            }
           },
           package: {
             type: 'entrypoint',
@@ -95,14 +110,37 @@ class ServerlessWebpack {
         .then(() => this.serverless.pluginManager.spawn('webpack:package')),
 
       'before:invoke:local:invoke': () => BbPromise.bind(this)
-        .then(() => this.serverless.pluginManager.spawn('webpack:validate'))
-        .then(() => this.serverless.pluginManager.spawn('webpack:compile'))
+        .then(() => {
+          lib.webpack.isLocal = true;
+          // --no-build override
+          if (this.options.build === false) {
+            this.skipCompile = true;
+          }
+
+          return this.serverless.pluginManager.spawn('webpack:validate');
+        })
+        .then(() => this.skipCompile ? BbPromise.resolve() : this.serverless.pluginManager.spawn('webpack:compile'))
         .then(this.prepareLocalInvoke),
 
       'after:invoke:local:invoke': () => BbPromise.bind(this)
         .then(() => {
           if (this.options.watch && !this.isWatching) {
-            return this.watch();
+            return this.watch('invoke:local');
+          }
+          return BbPromise.resolve();
+        }),
+
+      'before:run:run': () => BbPromise.bind(this)
+        .then(() => _.set(this.serverless, 'service.package.individually', false))
+        .then(() => this.serverless.pluginManager.spawn('webpack:validate'))
+        .then(() => this.serverless.pluginManager.spawn('webpack:compile'))
+        .then(this.packExternalModules)
+        .then(this.prepareRun),
+
+      'after:run:run': () => BbPromise.bind(this)
+        .then(() => {
+          if (this.options.watch && !this.isWatching) {
+            return this.watch(this.watchRun.bind(this));
           }
           return BbPromise.resolve();
         }),
@@ -121,6 +159,8 @@ class ServerlessWebpack {
       'webpack:compile:compile': () => BbPromise.bind(this)
         .then(this.compile),
 
+      'webpack:compile:watch:compile': () => BbPromise.resolve(),
+
       'webpack:package:packExternalModules': () => BbPromise.bind(this)
         .then(this.packExternalModules),
 
@@ -128,15 +168,25 @@ class ServerlessWebpack {
         .then(this.packageModules),
 
       'before:offline:start': () => BbPromise.bind(this)
+        .tap(() => {
+          lib.webpack.isLocal = true;
+        })
         .then(this.prepareOfflineInvoke)
-        .then(() => this.serverless.pluginManager.spawn('webpack:compile'))
         .then(this.wpwatch),
 
       'before:offline:start:init': () => BbPromise.bind(this)
+        .tap(() => {
+          lib.webpack.isLocal = true;
+        })
         .then(this.prepareOfflineInvoke)
-        .then(() => this.serverless.pluginManager.spawn('webpack:compile'))
         .then(this.wpwatch),
 
+      'before:step-functions-offline:start': () => BbPromise.bind(this)
+        .tap(() => {
+          lib.webpack.isLocal = true;
+        })
+        .then(this.prepareStepOfflineInvoke)
+        .then(() => this.serverless.pluginManager.spawn('webpack:compile')),
     };
   }
 }
